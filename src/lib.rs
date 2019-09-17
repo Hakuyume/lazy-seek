@@ -9,6 +9,10 @@ pub struct LazySeekBufReader<R> {
 }
 
 impl<R> LazySeekBufReader<R> {
+    pub fn new(inner: R) -> Self {
+        Self::with_capacity(1 << 13, inner)
+    }
+
     pub fn with_capacity(capacity: usize, inner: R) -> Self {
         unsafe {
             let mut buf = Vec::with_capacity(capacity);
