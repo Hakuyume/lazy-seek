@@ -1,109 +1,146 @@
 use std::io::{BufRead, Read, Result, Seek, SeekFrom};
 
-pub struct LazySeekBufReader<R> {
+pub struct BufReader<R> {
     inner: R,
-    buf: Box<[u8]>,
-    pos: i64,
-    cap: usize,
-    offset: Option<u64>,
+    offset: u64,
+    buf: Vec<u8>,
+    pos: Option<u64>,
 }
 
-impl<R> LazySeekBufReader<R> {
+impl<R> BufReader<R> {
     pub fn new(inner: R) -> Self {
-        Self::with_capacity(1 << 13, inner)
+        // https://github.com/rust-lang/rust/blob/1.76.0/library/std/src/sys_common/io.rs#L3
+        let capacity = if cfg!(target_os = "espidf") {
+            512
+        } else {
+            8 * 1024
+        };
+        Self::with_capacity(capacity, inner)
     }
 
     pub fn with_capacity(capacity: usize, inner: R) -> Self {
-        unsafe {
-            let mut buf = Vec::with_capacity(capacity);
-            buf.set_len(capacity);
-            Self {
-                inner,
-                buf: buf.into_boxed_slice(),
-                pos: 0,
-                cap: 0,
-                offset: None,
-            }
+        Self {
+            inner,
+            offset: 0,
+            buf: Vec::with_capacity(capacity),
+            pos: None,
         }
+    }
+
+    pub fn buffer(&self) -> &[u8] {
+        if let Some(start) = self.start() {
+            &self.buf[start..]
+        } else {
+            &[]
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.buf.capacity()
+    }
+
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+
+    fn start(&self) -> Option<usize> {
+        if let Some(pos) = self.pos {
+            if self.offset <= pos && pos < self.offset + self.buf.len() as u64 {
+                Some((pos - self.offset) as _)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    fn sync(&mut self) -> Result<u64>
+    where
+        R: Seek,
+    {
+        let pos = if let Some(pos) = self.pos {
+            self.inner.seek(SeekFrom::Start(pos))?;
+            pos
+        } else {
+            self.inner.stream_position()?
+        };
+        self.pos = Some(pos);
+        Ok(pos)
     }
 }
 
-impl<R> Read for LazySeekBufReader<R>
+impl<R> Read for BufReader<R>
 where
     R: Read + Seek,
 {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        if self.pos == self.cap as i64 && buf.len() >= self.buf.len() {
+        if self.start().is_none() && self.capacity() <= buf.len() {
+            let pos = self.sync()?;
             let len = self.inner.read(buf)?;
-            if let Some(offset) = self.offset.as_mut() {
-                *offset += len as u64;
-            }
-            self.pos = 0;
-            self.cap = 0;
+            self.pos = Some(pos + len as u64);
             Ok(len)
         } else {
             let len = self.fill_buf()?.read(buf)?;
             self.consume(len);
+            dbg!((self.offset, &self.buf, self.pos));
             Ok(len)
         }
     }
 }
 
-impl<R> Seek for LazySeekBufReader<R>
+impl<R> Seek for BufReader<R>
 where
     R: Seek,
 {
     fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
-        match (self.offset, pos) {
-            (Some(offset), SeekFrom::Current(pos)) => {
-                self.pos += pos;
-                Ok((offset as i64 + self.pos) as _)
+        match pos {
+            SeekFrom::Current(pos) => {
+                let pos = if let Some(pos) = self.pos {
+                    pos
+                } else {
+                    self.inner.stream_position()?
+                }
+                .saturating_add_signed(pos);
+                self.pos = Some(pos);
+                Ok(pos)
             }
-            (Some(offset), SeekFrom::Start(pos)) => {
-                self.pos = pos as i64 - offset as i64;
-                Ok((offset as i64 + self.pos) as _)
+            SeekFrom::Start(pos) => {
+                self.pos = Some(pos);
+                Ok(pos)
             }
             _ => {
-                let offset = match pos {
-                    SeekFrom::Current(pos) => self
-                        .inner
-                        .seek(SeekFrom::Current(pos + self.pos - self.cap as i64))?,
-                    _ => self.inner.seek(pos)?,
-                };
-                self.offset = Some(offset);
-                self.pos = 0;
-                self.cap = 0;
-                Ok(offset)
+                let pos = self.inner.seek(pos)?;
+                self.pos = Some(pos);
+                Ok(pos)
             }
         }
     }
 }
 
-impl<R> BufRead for LazySeekBufReader<R>
+impl<R> BufRead for BufReader<R>
 where
     R: Read + Seek,
 {
     fn fill_buf(&mut self) -> Result<&[u8]> {
-        if self.pos < 0 || self.cap as i64 <= self.pos {
-            if self.pos == self.cap as i64 {
-                if let Some(offset) = self.offset.as_mut() {
-                    *offset += self.cap as u64;
-                }
-            } else {
-                self.offset = Some(
-                    self.inner
-                        .seek(SeekFrom::Current(self.pos - self.cap as i64))?,
-                );
+        if let Some(start) = self.start() {
+            Ok(&self.buf[start..])
+        } else {
+            let pos = self.sync()?;
+            unsafe {
+                self.buf.set_len(self.buf.capacity());
+                let len = self.inner.read(&mut self.buf)?;
+                self.buf.set_len(len);
             }
-            self.cap = self.inner.read(&mut self.buf)?;
-            self.pos = 0;
+            self.offset = pos;
+            Ok(&self.buf)
         }
-        Ok(&self.buf[self.pos as usize..self.cap])
     }
 
     fn consume(&mut self, amt: usize) {
-        assert!(0 <= self.pos && self.pos + (amt as i64) <= self.cap as i64);
-        self.pos += amt as i64;
+        if let Some(pos) = &mut self.pos {
+            *pos += amt as u64;
+        }
     }
 }
 
