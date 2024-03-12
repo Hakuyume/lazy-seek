@@ -83,7 +83,6 @@ where
         } else {
             let len = self.fill_buf()?.read(buf)?;
             self.consume(len);
-            dbg!((self.offset, &self.buf, self.pos));
             Ok(len)
         }
     }
