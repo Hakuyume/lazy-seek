@@ -6,5 +6,5 @@ that calls `seek` of the underlying reader lazily.
 where `std::io::BufReader::seek` flushes it anytime.
 
 ## Example usage
-[`ZipArchive`](https://docs.rs/zip/0.6.6/zip/read/struct.ZipArchive.html) calls a lot of `seek`s and `read`s.
+[`ZipArchive`](https://docs.rs/zip/0.6.6/zip/read/struct.ZipArchive.html) calls a lot of `read`s and `seek`s.
 `lazy_seek::BufReader` can reduce the number of system calls and make the program faster.
